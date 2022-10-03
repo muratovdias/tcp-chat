@@ -17,7 +17,7 @@ func main() {
 	if len(os.Args) == 2 {
 		port = os.Args[1]
 	} else if len(os.Args) != 1 {
-		fmt.Println("[USAGE]: nc localhost $port")
+		fmt.Println("[USAGE]: ./TCPChat $port")
 		return
 	}
 	if err := NewServer().Run(port); err != nil {
@@ -30,6 +30,7 @@ type Server struct {
 	users    map[net.Conn]string
 	messages chan message
 }
+
 type message struct {
 	text string
 	name string
@@ -43,6 +44,14 @@ func NewServer() *Server {
 	}
 }
 
+func newMessage(msg string, userName string, conn net.Conn) message {
+	return message{
+		text: userText(userName) + msg,
+		name: userName,
+		conn: conn,
+	}
+}
+
 func (s *Server) Run(port string) error {
 	listener, err := net.Listen("tcp", ":"+port)
 	if err != nil {
@@ -53,47 +62,49 @@ func (s *Server) Run(port string) error {
 	} else {
 		fmt.Printf("Listening on the port :%s\n", port)
 	}
-	file, _ := os.Create("history.txt") // create .txt file to save the history of chat
+	file, err := os.Create("history.txt")
+	if err != nil {
+		return err
+	}
 	for {
-		conn, err := listener.Accept() // take a connection
+		conn, err := listener.Accept()
 		if err != nil {
 			return err
 		}
-		s.mut.Lock()
-		lenUsers := len(s.users)
-		s.mut.Unlock()
-		if lenUsers == 10 { // if count of members of chat to equal 10, close connection
-			conn.Write([]byte("Server is full, try to join later\n"))
-			conn.Close()
-		} else {
-			conn.Write([]byte("Welcome to TCP-Chat!\n"))
-			content, err := ioutil.ReadFile("logo.txt")
-			if err != nil {
-				fmt.Println(err)
-			}
-			conn.Write(content) // print penguin logo
-			go s.broadcaster(conn)
-			go s.handleConn(conn, file)
+		conn.Write([]byte("Welcome to TCP-Chat!\n"))
+		content, err := ioutil.ReadFile("logo.txt")
+		if err != nil {
+			fmt.Println(err)
 		}
+		// create .txt file to save the history of chat
+		conn.Write(content)
+		go s.broadcaster(conn)
+		go s.handleConn(conn, file)
 	}
 }
 
-// handleConn is take user name and messages and chech it
-func (s *Server) handleConn(myConn net.Conn, file *os.File) {
+func (s *Server) handleConn(myConn net.Conn, file *os.File) error {
+	defer myConn.Close()
 	reader := bufio.NewReader(myConn)
 	var userName, text string
 	// take a user name and check it
 	for {
 		myConn.Write([]byte("[ENTER YOUR NAME]:"))
 		userName, _ = reader.ReadString('\n')
+		userName = userName[:len(userName)-1]
 		flag := checkUserName(userName, s.users, myConn)
 		if flag {
 			continue
 		}
-		userName = userName[:len(userName)-1]
+		s.mut.Lock()
+		if len(s.users) > 9 {
+			myConn.Write([]byte("Server is full, try to join later\n"))
+			myConn.Close()
+		}
+		s.users[myConn] = userName
+		s.mut.Unlock()
 		break
 	}
-	s.users[myConn] = userName
 	history, err := ioutil.ReadFile(file.Name())
 	if err != nil {
 		log.Fatal(err)
@@ -117,18 +128,17 @@ func (s *Server) handleConn(myConn net.Conn, file *os.File) {
 			saveHistory(text, file) // store the history of chat
 			s.messages <- newMessage(text, userName, myConn)
 			break
-		} else if strings.TrimSpace(msg) == "" { // if the message is empty, then just skip it
+		} else if strings.TrimSpace(msg) == "" {
 			continue
 		} else {
 			historyText := userText(userName) + msg
 			saveHistory(historyText, file)
-			s.messages <- newMessage(msg, userName, myConn) // send the data in the channel
+			s.messages <- newMessage(msg, userName, myConn)
 		}
 	}
-	defer myConn.Close()
+	return nil
 }
 
-// broadcaster is get data from channel and send out to other members of chat
 func (s *Server) broadcaster(myConn net.Conn) {
 	for {
 		msg := <-s.messages
@@ -158,14 +168,6 @@ func checkUserName(userName string, users map[net.Conn]string, myConn net.Conn) 
 	return false
 }
 
-func newMessage(msg string, userName string, conn net.Conn) message {
-	return message{
-		text: userText(userName) + msg,
-		name: userName,
-		conn: conn,
-	}
-}
-
 func userText(userName string) string {
 	return fmt.Sprintf("\r[%s][%s]:", time.Now().Format("01-02-2006 15:04:05"), userName)
 }
@@ -174,7 +176,6 @@ func clear(a string) string {
 	return "\r" + strings.Repeat(" ", 27+len(a)) + "\r"
 }
 
-// saveHistory saves history of our chat
 func saveHistory(h string, f *os.File) {
 	if _, err := f.WriteString(h); err != nil {
 		log.Fatal()
